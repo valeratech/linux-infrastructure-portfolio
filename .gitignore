@@ -1,0 +1,24 @@
+# Raw, unsanitized lab evidence — never committed
+evidence-working/
+**/evidence-working/
+
+# Audit denylists — never committed
+.audit-denylist
+**/.audit-denylist
+
+# CA state and private key material
+ca/
+**/ca/
+*.key
+*-key.pem
+*.p12
+*.pfx
+
+# script(1) timing files
+timing.log
+*.timing
+
+# Editor / OS noise
+.DS_Store
+*.swp
+*~
