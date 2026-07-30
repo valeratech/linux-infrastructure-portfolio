@@ -14,7 +14,7 @@ commit.
 
 | Project | Focus | Status |
 |---|---|---|
-| [secure-nginx-apache-platform](../secure-nginx-apache-platform) | Hand-built nginx → Apache → PHP-FPM hosting stack; de-abstraction of a Plesk-managed architecture, with break/fix failure analysis | In progress |
+| [secure-nginx-apache-platform](https://github.com/valeratech/secure-nginx-apache-platform) | Hand-built nginx → Apache → PHP-FPM hosting stack; de-abstraction of a Plesk-managed architecture, with break/fix failure analysis | In progress |
 
 <!-- Add rows as projects land. Update the link to the real repo URL once pushed. -->
 
