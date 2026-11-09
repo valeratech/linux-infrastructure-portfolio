@@ -15,6 +15,7 @@ commit.
 | Project | Focus | Status |
 |---|---|---|
 | [secure-nginx-apache-platform](https://github.com/valeratech/secure-nginx-apache-platform) | Hand-built nginx → Apache → PHP-FPM hosting stack; de-abstraction of a Plesk-managed architecture, with break/fix failure analysis | In progress |
+| [secure-mail-platform](https://github.com/valeratech/secure-mail-platform) | Hand-built Postfix / Dovecot / rspamd / Roundcube mail platform on AlmaLinux 10 with MariaDB virtual users, private CA, and SPF/DKIM/DMARC validation in an isolated lab; Builder/Reviewer gated | In progress — Section 1 in review |
 
 <!-- Add rows as projects land. Update the link to the real repo URL once pushed. -->
 
