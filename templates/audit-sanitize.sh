@@ -41,7 +41,20 @@ ALLOWFILE="${ROOT}/.audit-allow"
 
 # GITIGNORED denylist: employer, customer, and production strings that must never appear.
 # Keeping it out of git is the point — the denylist itself would be a leak.
-DENYFILE="${ROOT}/.audit-denylist"
+DENYFILE="${AUDIT_DENYLIST:-${ROOT}/.audit-denylist}"
+
+# Set AUDIT_REDACT=1 (CI does) to withhold every matched value from output. Logs outlive
+# the commits they describe: a value echoed into a CI log survives a history rewrite.
+# Credential and license classes never echo their value, redacted or not.
+AUDIT_REDACT="${AUDIT_REDACT:-0}"
+
+# Secret-bearing patterns, defined once and used twice: by the credential and license
+# detectors, and by show(), which withholds EVERY value on a line matching either one,
+# whichever class reports it. Classes overlap — a dotted credential is also domain-shaped,
+# a dotted license identifier parses as a domain, an @ in a password makes an email — so
+# redaction is decided per line, not per class.
+CRED_RE="(password|passwd|secret|api[_-]?key|token|DB_PASSWORD)[[:space:]]*[:=][[:space:]]*['\"]?[A-Za-z0-9!@#\$%^&*_+-]{8,}"
+LIC_RE='\b(PLSK|CLN)\.[A-Z0-9]{6,}'
 
 # ----------------------------------------------------------------------------------------
 RED=$'\033[31m'; YEL=$'\033[33m'; GRN=$'\033[32m'; DIM=$'\033[2m'; RST=$'\033[0m'
@@ -53,6 +66,41 @@ report() { # report <severity> <class> <file:line> <detail>
   printf '%s  %-4s%s  %-22s %s\n' "$col" "$sev" "$RST" "$cls" "$loc"
   printf '        %s%s%s\n' "$DIM" "$det" "$RST"
   FINDINGS=$((FINDINGS+1))
+}
+
+# Deny-list terms, loaded once for the redaction decision below. Section 1 still reads the
+# file for detection; this copy only decides what may be printed. Same skip rules.
+DENY_TERMS=()
+if [ -r "$DENYFILE" ]; then
+  while IFS= read -r t; do
+    [ -z "$t" ] && continue
+    case "$t" in \#*) continue ;; esac
+    DENY_TERMS+=("$t")
+  done < "$DENYFILE"
+fi
+
+sensitive_line() { # sensitive_line <source-line> — credential, license, or deny-listed term
+  grep -qiE -- "$CRED_RE" <<<"$1" && return 0
+  grep -qiE -- "$LIC_RE"  <<<"$1" && return 0
+  local t
+  for t in ${DENY_TERMS[@]+"${DENY_TERMS[@]}"}; do
+    grep -qiF -- "$t" <<<"$1" && return 0
+  done
+  return 1
+}
+
+show() { # show <value> <source-line>
+  # Withholds when AUDIT_REDACT=1, and ALWAYS when the source line is sensitive: it carries
+  # a credential or license pattern, or a deny-listed term. Every reporting class calls this,
+  # so a sensitive value cannot leak through whichever class happens to match it. Matching
+  # is case-insensitive, so withholding errs toward safety.
+  if sensitive_line "$2"; then
+    printf '(value withheld: line carries a sensitive match)'
+  elif [ "$AUDIT_REDACT" = 1 ]; then
+    printf '(value withheld)'
+  else
+    printf '%s' "$1"
+  fi
 }
 
 allowed() { # allowed <string> — true if listed in .audit-allow
@@ -102,7 +150,9 @@ if [ -r "$DENYFILE" ]; then
     case "$term" in \#*) continue ;; esac
     while IFS=: read -r f n _; do
       [ -n "${f:-}" ] && report HIGH "denylisted-term" "${f}:${n}" "matched a term from .audit-denylist (term not echoed here by design)"
-    done < <(grep -rHInF -- "$term" "${FILES[@]}" 2>/dev/null | grep -v 'audit-ok')
+    # Case-insensitive, and deliberately NOT filtered by the audit-ok pragma: the pragma
+    # marks lines that are detection patterns, and no deny-listed term is ever one.
+    done < <(grep -rHIniF -- "$term" "${FILES[@]}" 2>/dev/null)
   done < "$DENYFILE"
 else
   printf '%s  note%s  no .audit-denylist present — create one (gitignored) listing employer,\n' "$YEL" "$RST"
@@ -118,7 +168,7 @@ while IFS=: read -r f n rest; do
     [[ "$ip" =~ $IP_OK_RE ]] && continue
     allowed "$ip" && continue
     # Version-like strings can look like addresses; they still surface for a decision.
-    report HIGH "unapproved-ip" "${f}:${n}" "$ip — approved: loopback, ${LAB_SUBNET_RE}, RFC5737 doc ranges"
+    report HIGH "unapproved-ip" "${f}:${n}" "$(show "$ip" "$rest") — approved: loopback, ${LAB_SUBNET_RE}, RFC5737 doc ranges"
   done
 done < <(grep -rHInE '\b([0-9]{1,3}\.){3}[0-9]{1,3}\b' "${FILES[@]}" 2>/dev/null | grep -v 'audit-ok')
 
@@ -134,7 +184,7 @@ while IFS=: read -r f n rest; do
     [[ "$d" =~ \.(sh|md|conf|d|log|txt|yml|yaml|json|png|jpg|php|css|js|crt|pem|key|toml|ini|gz|tar|py|sql|csv|html|tpl)$ ]] && continue
     # systemd units and similar dotted non-hostnames
     [[ "$d" =~ \.(service|socket|target|timer|mount|slice|device|path|swap)$ ]] && continue
-    report HIGH "unapproved-domain" "${f}:${n}" "$d — lab hosts must be *.lab; docs use example.com / *.invalid"
+    report HIGH "unapproved-domain" "${f}:${n}" "$(show "$d" "$rest") — lab hosts must be *.lab; docs use example.com / *.invalid"
   done
 done < <(grep -rHInE '\b([a-zA-Z0-9](-?[a-zA-Z0-9])*\.)+[a-zA-Z]{2,24}\b' "${FILES[@]}" 2>/dev/null | grep -v 'audit-ok')
 
@@ -146,26 +196,26 @@ while IFS=: read -r f n _; do
 done < <(grep -rHIn -- '-----BEGIN .*PRIVATE KEY-----' "${FILES[@]}" 2>/dev/null | grep -v 'audit-ok') # audit-ok
 
 while IFS=: read -r f n rest; do
-  [ -n "${f:-}" ] && report HIGH "license-key" "${f}:${n}" "$(cut -c1-60 <<<"$rest")"
-done < <(grep -rHInE '\b(PLSK|CLN)\.[A-Z0-9]{6,}' "${FILES[@]}" 2>/dev/null | grep -v 'audit-ok')
+  [ -n "${f:-}" ] && report HIGH "license-key" "${f}:${n}" "license identifier — value never echoed"
+done < <(grep -rHInE -- "$LIC_RE" "${FILES[@]}" 2>/dev/null | grep -v 'audit-ok')
 
 while IFS=: read -r f n rest; do
-  [ -n "${f:-}" ] && report HIGH "credential-literal" "${f}:${n}" "$(cut -c1-60 <<<"$rest")"
-done < <(grep -rHInE "(password|passwd|secret|api[_-]?key|token|DB_PASSWORD)[[:space:]]*[:=][[:space:]]*['\"]?[A-Za-z0-9!@#\$%^&*_+-]{8,}" "${FILES[@]}" 2>/dev/null | grep -viE '(changeme|placeholder|example|redacted|<[a-z-]+>|\$\{|xxxx|your-)' | grep -v 'audit-ok')
+  [ -n "${f:-}" ] && report HIGH "credential-literal" "${f}:${n}" "credential assignment — value never echoed"
+done < <(grep -rHInE -- "$CRED_RE" "${FILES[@]}" 2>/dev/null | grep -viE '(changeme|placeholder|example|redacted|<[a-z-]+>|\$\{|xxxx|your-)' | grep -v 'audit-ok')
 
 # ----------------------------------------------------------------------------------------
 # 5. Host machine and hypervisor identifiers
 # ----------------------------------------------------------------------------------------
 while IFS=: read -r f n rest; do
-  [ -n "${f:-}" ] && report WARN "mac-address" "${f}:${n}" "$(grep -oE '([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}' <<<"$rest" | head -1)"
+  [ -n "${f:-}" ] && report WARN "mac-address" "${f}:${n}" "$(show "$(grep -oE '([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}' <<<"$rest" | head -1)" "$rest")"
 done < <(grep -rHInE '\b([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}\b' "${FILES[@]}" 2>/dev/null | grep -v 'audit-ok')
 
 while IFS=: read -r f n rest; do
-  [ -n "${f:-}" ] && report WARN "vmware-identifier" "${f}:${n}" "$(cut -c1-60 <<<"$rest")"
+  [ -n "${f:-}" ] && report WARN "vmware-identifier" "${f}:${n}" "$(show "$(grep -oE '[A-Za-z0-9._-]*\.(vmx|vmdk|nvram|vmsn)\b|vmware-[0-9]+\.log' <<<"$rest" | head -1)" "$rest")"
 done < <(grep -rHInE '\.(vmx|vmdk|nvram|vmsn)\b|vmware-[0-9]+\.log' "${FILES[@]}" 2>/dev/null | grep -v 'audit-ok')
 
 while IFS=: read -r f n rest; do
-  [ -n "${f:-}" ] && report WARN "absolute-home-path" "${f}:${n}" "$(grep -oE '(/home/|/Users/|C:\\Users\\)[A-Za-z0-9._-]+' <<<"$rest" | head -1)"
+  [ -n "${f:-}" ] && report WARN "absolute-home-path" "${f}:${n}" "$(show "$(grep -oE '(/home/|/Users/|C:\\Users\\)[A-Za-z0-9._-]+' <<<"$rest" | head -1)" "$rest")"
 done < <(grep -rHInE '(/home/|/Users/|C:\\Users\\)[A-Za-z0-9._-]+' "${FILES[@]}" 2>/dev/null | grep -viE '/home/(user|lab|site-[ab])\b' | grep -v 'audit-ok')
 
 # ----------------------------------------------------------------------------------------
@@ -176,7 +226,7 @@ while IFS=: read -r f n rest; do
   for e in $(grep -oiE '[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}' <<<"$rest" | sort -u); do
     [[ "$e" =~ (\.lab|\.invalid|example\.(com|org))$ ]] && continue
     allowed "$e" && continue
-    report HIGH "email-address" "${f}:${n}" "$e"
+    report HIGH "email-address" "${f}:${n}" "$(show "$e" "$rest")"
   done
 done < <(grep -rHInE '[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}' "${FILES[@]}" 2>/dev/null | grep -v 'audit-ok')
 

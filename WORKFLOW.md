@@ -100,14 +100,35 @@ For infrastructure projects the pattern classes are:
 commit is itself the leak. `.audit-allow` is committed, because every approval should be
 reviewable.
 
+Deny-list matching is case-insensitive. Whether a project *requires* a deny-list is a
+per-project decision recorded in that project: without one the audit prints a note and can
+still report `CLEAN`, which is correct for a project with no employer or customer strings
+to protect, and wrong for one that has them.
+
 Exempt a single line with an inline `audit-ok` comment where the line is a detection
-pattern rather than a real value.
+pattern rather than a real value. The pragma exempts pattern classes only — **it never
+exempts a deny-listed term**, because no deny-listed term is ever a detection pattern.
+
+The audit never prints any value from a line that carries a credential or license pattern
+or a deny-listed term, whichever class reports it. Classes overlap: a dotted credential is
+also domain-shaped, a license identifier can parse as a domain, and a deny-listed host is
+domain-shaped too, so withholding is decided per line, not per class.
+Identifier values (IPs, domains, addresses) on other lines print locally to support the
+decision, and are withheld when `AUDIT_REDACT=1`, which CI sets: logs outlive commits, so a
+value echoed into a CI log survives a history rewrite that removes it from the repository.
+
+Redaction withholds matched **content values**. Every finding still prints its file path and
+line number, under `AUDIT_REDACT=1` too, so a sensitive value embedded in a filename is not
+withheld. Name files clean at the source.
 
 **b. gitleaks — the secrets backstop.**
 
 ```bash
 gitleaks dir . --config .gitleaks.toml --no-banner
 ```
+
+`gitleaks dir` scans the working tree only. It never walks history and prints no commit
+count; the history scan, and its commit-count proof, is CI's job (step 7).
 
 gitleaks catches secret *shapes* (keys, tokens, connection strings). The custom audit
 catches project-*specific* identifiers. They overlap on purpose and fail differently;
@@ -145,14 +166,47 @@ at stage boundaries with messages describing the architectural change.
 ## 7. Push and confirm CI
 
 ```bash
-git push && sleep 5
-SHA=$(git log --oneline -1 | cut -d' ' -f1)
-RUN=$(gh run list -L5 --json databaseId,headSha \
-      -q ".[] | select(.headSha|startswith(\"$SHA\")) | .databaseId")
-gh run watch "$RUN" && gh run view "$RUN" --log | grep -E 'Scanned [0-9]+ commit'
+(
+  fail() { echo "CI unconfirmed: $*" >&2; exit 1; }
+  git push                          || fail "push rejected"
+  SHA=$(git rev-parse HEAD)         || fail "cannot resolve HEAD"
+  RUN=
+  for _ in 1 2 3 4 5 6; do          # runs appear after a short delay
+    RUN=$(gh run list --commit "$SHA" --workflow gates -L 1 \
+          --json databaseId -q '.[0].databaseId') || fail "run lookup failed"
+    [ -n "$RUN" ] && break
+    sleep 5
+  done
+  [ -n "$RUN" ]                     || fail "no matching run located"
+  gh run watch "$RUN" --exit-status || fail "run $RUN did not succeed"
+  LOG=$(gh run view "$RUN" --log)   || fail "log retrieval failed"
+  grep -Ei '([0-9]+ commits? scanned|scanned [0-9]+ commits?)' <<<"$LOG" \
+                                    || fail "no commit-count proof in the log"
+  echo "CI confirmed for $SHA"
+)
 ```
 
-The SHA→run-ID pattern ties the confirmation to *this* commit's run, not a stale one.
+The block checks every step explicitly and runs as one subshell, so it fails closed on a
+rejected push, an unresolved SHA, a failed lookup, a failed run, a failed log retrieval, or a
+missing commit count. It does not use `set -e`: bash suppresses `set -e`, even inside a
+subshell that sets it, whenever the subshell sits in an `if`, `&&` or `||` context, so a block
+that relied on it would fail open the moment it was chained. Explicit checks hold in every
+context, and because the block is a subshell, a failure ends the block, not the terminal it
+was pasted into. The log is captured before it is searched: a pipeline into `grep` would let
+matching output mask a failed retrieval.
+
+Filtering on the full SHA and the named workflow ties the confirmation to *this* commit's
+run, not a stale or unrelated one.
+`--exit-status` makes the watch fail when the run fails; without it the watch confirms only
+that the run finished. The commit-count pattern accepts either word order, because Gitleaks
+phrasing differs between versions and a pattern pinned to one phrasing fails silently on
+the other — indistinguishable from a scan that never ran.
+
+An empty `RUN` means no matching run was located, not that none exists: it may not be visible
+yet, or no workflow may have fired. Either way, CI is unconfirmed until the run is identified
+and its successful conclusion verified. CI runs automatically on pushes to `main` and on pull
+requests. A pushed branch with no pull request triggers nothing automatically; it is scanned
+only if run manually (`gh workflow run gates --ref <branch>`).
 
 Server-side CI is the authoritative gate. It runs gitleaks across the **full commit
 history** rather than the working tree, and cannot be bypassed the way a local hook can

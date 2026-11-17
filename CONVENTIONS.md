@@ -110,6 +110,17 @@ A lab entry is committed only after raw evidence is collected, sensitive content
 scrubbed, the write-up matches the actual observed result, and the clean reference
 configuration has been restored.
 
+## Changes to shared standards
+
+`WORKFLOW.md`, `CONVENTIONS.md`, and `templates/` are owned here. Repositories that adapt
+them may pin a commit; a pinned adopter is unaffected by later changes until it chooses to
+re-pin. Any commit that changes one of these three is announced to each pinned adopter's
+thread with the commit and a one-line summary, so the adopter can decide whether to re-pin.
+
+This is a manual duty with no enforcement, and a missed notice produces no error anywhere:
+the adopter simply believes it is current. Send the notice in the same session as the
+commit, never later.
+
 ## Sources
 
 Primary sources only: upstream project documentation (httpd, nginx, PHP), distribution
